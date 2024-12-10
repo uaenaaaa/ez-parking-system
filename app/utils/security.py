@@ -1,10 +1,14 @@
 """ Security utilities for generating high-entropy seeds. """
 
-from os import getenv, getpid, urandom, times
-from time import time_ns, time, perf_counter_ns
-from socket import gethostname
+from base64 import b32encode, urlsafe_b64encode
+from datetime import datetime, timedelta
 from hashlib import sha256
+from os import getenv, getpid, urandom, times
+from socket import gethostname
+from time import time_ns, time, perf_counter_ns
+
 from psutil import Process
+from pyotp import TOTP
 
 
 def get_otp_seed() -> str:
@@ -15,7 +19,6 @@ def get_otp_seed() -> str:
         str: A hex string derived from multiple entropy sources.
     """
     try:
-        # System-specific elements
         process_id = str(getpid())
         hostname = gethostname()
         nano_time = str(time_ns())
@@ -24,7 +27,6 @@ def get_otp_seed() -> str:
         totp_secret = str(getenv("TOTP_SECRET_KEY", ""))
         current_time = str(int(time()))
 
-        # Combine and hash all elements
         combined = (
             f"{totp_secret}"
             f"{current_time}"
@@ -37,7 +39,6 @@ def get_otp_seed() -> str:
         return sha256(combined.encode()).hexdigest()
 
     except Exception:  # pylint: disable=W0718
-        # Fallback with reliable sources
         system_time = str(perf_counter_ns())
         process_start_time = str(times().user)
         totp_secret = str(getenv("TOTP_SECRET_KEY", ""))
@@ -47,3 +48,28 @@ def get_otp_seed() -> str:
             f"{totp_secret}" f"{current_time}" f"{system_time}" f"{process_start_time}"
         )
         return sha256(combined.encode()).hexdigest()
+
+
+def generate_otp() -> tuple:
+    """
+    Generate a six-digit OTP using TOTP.
+
+    Returns:
+        tuple: A tuple containing the OTP code and its expiry time.
+    """
+    return (
+        TOTP(
+            b32encode(bytes.fromhex(f"{getenv('TOTP_SECRET_KEY')}{int(time())}")).decode("UTF-8"),
+            digits=6,
+            interval=300,
+            digest=sha256).now(),
+        datetime.now() + timedelta(minutes=5)
+    )
+
+def generate_token():
+    """ Generate url safe token """
+    return urlsafe_b64encode(urandom(128)).decode("utf-8").rstrip("=")
+
+def get_random_string() -> str:
+    """ Generate a random string of 32 characters. """
+    return urandom(32).hex()

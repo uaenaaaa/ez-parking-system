@@ -1,7 +1,7 @@
 """ Base configuration for the application. """
 
-from os import getenv, getcwd, path
 from datetime import timedelta
+from os import getenv, getcwd, path
 
 
 class BaseConfig:  # pylint: disable=too-few-public-methods
@@ -51,3 +51,12 @@ class BaseConfig:  # pylint: disable=too-few-public-methods
 
     DEVELOPMENT_URL = getenv("DEVELOPMENT_URL", "http://localhost:5000")
     PRODUCTION_URL = getenv("PRODUCTION_URL", "")
+
+    CELERY_BROKER_URL = getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    CELERY_RESULT_BACKEND = getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+
+    R2_ACCOUNT_ID = getenv("R2_ACCOUNT_ID")
+    R2_ACCESS_KEY_ID = getenv("R2_ACCESS_KEY_ID")
+    R2_SECRET_ACCESS_KEY = getenv("R2_SECRET_ACCESS_KEY")
+    R2_BUCKET_NAME = getenv("R2_BUCKET_NAME")
+    R2_ENDPOINT = getenv("R2_ENDPOINT")

@@ -2,40 +2,42 @@
 
 # pylint disable=R0401
 
-import base64
-import time
-from base64 import urlsafe_b64encode
 from datetime import datetime, timedelta
-from hashlib import sha256
-from os import getenv, urandom
-from uuid import uuid4
+from os import getenv
 
+import pytz
 from flask import render_template
 from flask_jwt_extended import create_access_token, create_refresh_token
-from pyotp import TOTP
 
 from app.exceptions.authorization_exceptions import (
-    EmailAlreadyTaken,
-    ExpiredOTPException,
-    IncorrectOTPException,
-    EmailNotFoundException,
-    PhoneNumberAlreadyTaken,
+    EmailAlreadyTaken, ExpiredOTPException, IncorrectOTPException, PhoneNumberAlreadyTaken,
     RequestNewOTPException,
 )
-from app.models.user import UserOperations, OTPOperations
-from app.utils.email_utility import send_mail
+from app.models.address import AddressRepository
+from app.models.company_profile import CompanyProfileRepository
+from app.models.operating_hour import OperatingHoursRepository
+from app.models.parking_establishment import ParkingEstablishmentRepository
+from app.models.pricing_plan import PricingPlanRepository
+from app.models.user import AuthOperations, OTPOperations, UserRepository
+from app.tasks import send_mail
+from app.utils.security import generate_otp, generate_token
 
 
 class AuthService:
     """Class to handle user authentication operations."""
+    @staticmethod
+    def create_new_user(sign_up_data: dict):
+        """Create a new user account."""
+        user_registration = UserRegistration()
+        return user_registration.create_new_user(sign_up_data)
 
-    @classmethod
-    def create_new_user(cls, registration_data: dict):  # pylint: disable=C0116
-        return UserRegistrationService.register_user(user_data=registration_data)
+    @staticmethod
+    def verify_email(token: str):  # pylint: disable=C0116
+        return EmailVerification.verify_email(token=token)
 
     @classmethod
     def login_user(cls, login_data: dict):  # pylint: disable=C0116
-        return UserLoginService.login_user(login_data=login_data)
+        return UserLoginService.login_user(login_data)
 
     @classmethod
     def generate_otp(cls, email: str):  # pylint: disable=C0116
@@ -45,81 +47,19 @@ class AuthService:
     def verify_otp(cls, email: str, otp: str):  # pylint: disable=C0116
         return UserOTPService.verify_otp(email=email, otp=otp)
 
-    @classmethod
-    def verify_email(cls, token: str):  # pylint: disable=C0116
-        return UserRegistrationService.verify_email(token=token)
-
-
-class UserRegistrationService:  # pylint: disable=R0903
-    """Class to handle user registration operations."""
-
-    @classmethod
-    def register_user(cls, user_data: dict):  # pylint: disable=C0116
-        email = user_data.get("email")
-        is_email_taken: bool = UserOperations.is_email_taken(email=email)  # type: ignore
-        if is_email_taken:
-            raise EmailAlreadyTaken(message="Email already taken.")
-        is_phone_number = UserOperations.is_phone_number_taken(
-            phone_number=user_data.get("phone_number")  # type: ignore
-        )
-        if is_phone_number:
-            raise PhoneNumberAlreadyTaken(message="Phone number already taken.")
-        phone_number = user_data.get("phone_number")
-        verification_token = urlsafe_b64encode(urandom(128)).decode("utf-8").rstrip("=")
-        is_production = getenv("ENVIRONMENT") == "production"
-        base_url = (
-            getenv("PRODUCTION_URL") if is_production else getenv("DEVELOPMENT_URL")
-        )
-        verification_url = f"{base_url}/auth/verify-email/{verification_token}"
-        template = render_template(
-            "auth/onboarding.html", verification_url=verification_url
-        )
-
-        first_name = user_data.get("first_name")
-        last_name = user_data.get("last_name")
-        uuid: bytes = uuid4().bytes
-        user_data = {
-            "uuid": uuid,
-            "first_name": first_name,
-            "last_name": last_name,
-            "email": email,
-            "phone_number": phone_number,
-            "plate_number": user_data.get("plate_number"),
-            "nickname": user_data.get("nickname"),
-            "role": user_data.get("role"),
-            "creation_date": datetime.now(),
-            "verification_token": verification_token,
-            "verification_expiry": datetime.now() + timedelta(days=7),
-            "is_verified": False,
-        }
-        UserOperations.create_new_user(user_data=user_data)
-        return send_mail(message=template, email=email, subject="Welcome to EZ Parking")
-
-    @classmethod
-    def verify_email(cls, token: str):  # pylint: disable=C0116
-        return UserOperations.verify_email(token=token)
-
 
 class UserLoginService:  # pylint: disable=R0903
     """Class to handle user login operations."""
-
     @classmethod
     def login_user(cls, login_data: dict):  # pylint: disable=C0116
         email = login_data.get("email")
-
-        is_email_taken = UserOperations.is_email_taken(email=email)  # type: ignore
-        if not is_email_taken:
-            raise EmailNotFoundException(message="Email not found.")
-
-        user = UserOperations.login_user(email=email)  # type: ignore
-        user_email = user
-        # Send otp to user to their email by calling the generate_otp method
-        return UserOTPService.generate_otp(email=user_email)  # type: ignore
+        role = login_data.get("role")
+        user_email = AuthOperations.login_user(email, role).get("email")
+        return UserOTPService.generate_otp(email=user_email)
 
 
 class SessionTokenService:  # pylint: disable=R0903
     """This class is responsible for the session token service."""
-
     @staticmethod
     def generate_session_token(email, user_id) -> str:
         """This is the function responsible for generating the session token."""
@@ -137,38 +77,161 @@ class UserOTPService:
     @classmethod
     def generate_otp(cls, email: str):
         """Function to generate an OTP for a user."""
-        if not isinstance(email, str):
-            raise TypeError("Email must be a string.")
-        email = email.lower()
-        seed = f"{getenv('TOTP_SECRET_KEY')}{int(time.time())}"
-        six_digits_otp = TOTP(
-            base64.b32encode(bytes.fromhex(seed)).decode("UTF-8"),
-            digits=6,
-            interval=300,
-            digest=sha256,
-        ).now()
-        otp_expiry: datetime = datetime.now() + timedelta(minutes=5)
+        otp_code, otp_expiry = generate_otp()
         one_time_password_template = render_template(
-            template_name_or_list="auth/one-time-password.html",
-            otp=six_digits_otp,
-            user_name=email,
+            template_name_or_list="auth/one-time-password.html", otp=otp_code, user_name=email,
         )
-        data = {"email": email, "otp_secret": six_digits_otp, "otp_expiry": otp_expiry}
-        OTPOperations.set_otp(data=data)
-        send_mail(
-            message=one_time_password_template, email=email, subject="One Time Password"
-        )
+        OTPOperations.set_otp({"email": email, "otp_secret": otp_code, "otp_expiry": otp_expiry})
+        send_mail(message=one_time_password_template, email=email, subject="One Time Password")
 
     @classmethod
-    def verify_otp(cls, otp: str, email: str):  # pylint: disable=W0613
-        """Function to verify an OTP for a user."""
-        retrieved_otp, expiry, user_id, role = OTPOperations.get_otp(email=email)
-        if expiry is None or retrieved_otp is None:
+    def verify_otp(cls, otp: str, email: str) -> tuple[int, str]:
+        """
+        Verify OTP for a user.
+
+        Args:
+            otp: The OTP to verify
+            email: User's email
+
+        Returns:
+            tuple: (user_id, role)
+
+        Raises:
+            RequestNewOTPException: If OTP not found
+            ExpiredOTPException: If OTP expired
+            IncorrectOTPException: If OTP incorrect
+        """
+        res = OTPOperations.get_otp(email=email)
+        user_id = res.get("user_id")
+        role = res.get("role")
+        retrieved_otp = res.get("otp_secret")
+        expiry_str = res.get("otp_expiry")
+
+        if not retrieved_otp or not expiry_str:
             raise RequestNewOTPException("Please request for a new OTP.")
-        if datetime.now() > expiry:
+
+        expiry = datetime.fromisoformat(expiry_str)
+        current_time = datetime.now(pytz.UTC) if expiry.tzinfo else datetime.now()
+
+        if current_time > expiry:
             OTPOperations.delete_otp(email=email)
             raise ExpiredOTPException(message="OTP has expired.")
+
         if retrieved_otp != otp or not otp:
             raise IncorrectOTPException(message="Incorrect OTP.")
+
         OTPOperations.delete_otp(email=email)
         return user_id, role
+
+
+class UserRegistration:  # pylint: disable=R0903
+    """User Registration Service"""
+
+    def create_new_user(self, sign_up_data: dict):
+        """Create a new user account."""
+        user_email = sign_up_data.get("email")
+        role = sign_up_data.get("role")
+        UserRepository.is_field_taken("email", user_email, EmailAlreadyTaken)
+        UserRepository.is_field_taken(
+            "phone_number", sign_up_data.get("phone_number"), PhoneNumberAlreadyTaken
+        )
+        verification_token = generate_token()
+        is_production = getenv("ENVIRONMENT") == "production"
+        base_url = (getenv("PRODUCTION_URL") if is_production else getenv("DEVELOPMENT_URL"))
+        template = render_template(
+            "auth/onboarding.html",
+            verification_url=f"{base_url}/auth/verify-email/{verification_token}"
+        )
+        sign_up_data.update({
+            "is_verified": False,
+            "created_at": datetime.now(),
+            "verification_token": verification_token,
+            "verification_expiry": datetime.now() + timedelta(days=7),
+        })
+        user_id = UserRepository.create_user(sign_up_data)
+        if role == "parking_manager":
+            owner_type = sign_up_data.get("owner_type")
+            company_profile = {
+                "profile_id": user_id,
+                "owner_type": owner_type,
+                "tin": sign_up_data.get("tin"),
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+            }
+            if owner_type == "company":
+                company_profile.update({
+                    "company_name": sign_up_data.get("company_name"),
+                    "company_reg_number": sign_up_data.get("company_reg_number"),
+                })
+            company_profile_id = CompanyProfileRepository.create_new_company_profile({
+                "profile_id": user_id,
+                "owner_type": owner_type,
+                "company_name": sign_up_data.get("company_name"),
+                "company_reg_number": sign_up_data.get("company_reg_number"),
+                "tin": sign_up_data.get("tin"),
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+            })
+            address_id = self.add_new_address({
+                "profile_id": company_profile_id,
+                "street": sign_up_data.get("street"),
+                "barangay": sign_up_data.get("barangay"),
+                "city": sign_up_data.get("city"),
+                "province": sign_up_data.get("province"),
+                "postal_code": sign_up_data.get("postal_code"),
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+            })
+            parking_establishment_id = self.add_new_parking_establishment({
+                "profile_id": company_profile_id,
+                "space_type": sign_up_data.get("space_type"),
+                "space_layout": sign_up_data.get("space_layout"),
+                "custom_layout": sign_up_data.get("custom_layout"),
+                "dimension": sign_up_data.get("dimension"),
+                "is_24_hours": sign_up_data.get("is_24_hours"),
+                "access_info": sign_up_data.get("access_info"),
+                "custom_access_info": sign_up_data.get("custom_access_info"),
+                "status": "pending",
+                "lighting": sign_up_data.get("lighting"),
+                "accessibility": sign_up_data.get("accessibility"),
+                "nearby_landmarks": sign_up_data.get("nearby_landmarks"),
+                "longitude": sign_up_data.get("longitude"),
+                "latitude": sign_up_data.get("latitude"),
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+            })
+            pricing_plan_id = self.add_pricing_plan(
+                parking_establishment_id, sign_up_data.get("pricing_plan")
+            )
+            print(parking_establishment_id, pricing_plan_id, address_id)
+            self.add_operating_hours(parking_establishment_id, sign_up_data.get("operating_hours"))
+        return send_mail(user_email, template, "Welcome to EZ Parking")
+
+    @staticmethod
+    def add_new_address(address_data: dict):
+        """Add a new address."""
+        return AddressRepository.create_address(address_data)
+
+    @staticmethod
+    def add_new_parking_establishment(establishment_data: dict):
+        """Add a new parking establishment."""
+        return ParkingEstablishmentRepository.create_establishment(establishment_data)
+
+    @staticmethod
+    def add_operating_hours(establishment_id: int, operating_hours: dict):
+        """Add operating hours for a parking establishment."""
+        return OperatingHoursRepository.create_operating_hours(establishment_id, operating_hours)
+
+    @staticmethod
+    def add_pricing_plan(establisment_id: int, pricing_plan_data: dict):
+        """Add a pricing plan."""
+        return PricingPlanRepository.create_pricing_plan(establisment_id, pricing_plan_data)
+
+
+class EmailVerification:  # pylint: disable=R0903
+    """Email Verification Service"""
+
+    @staticmethod
+    def verify_email(token: str):
+        """Verify the email."""
+        return UserRepository.verify_email(token)
