@@ -2,9 +2,10 @@
     This is responsible for initializing the Database engine and session
 """
 
-from os import getenv
 import logging
 from logging import FileHandler, StreamHandler, getLogger
+from os import getenv
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -19,7 +20,7 @@ logger.setLevel(logging.WARNING)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-IS_PRODUCTION = getenv("ENVIRONMENT") == "production"
+IS_PRODUCTION = getenv("FLASK_ENV") == "production"
 
 DATABASE_URL = (
     IS_PRODUCTION and getenv("DATABASE_LIVE_URL") or getenv("DATABASE_DEV_URL")
